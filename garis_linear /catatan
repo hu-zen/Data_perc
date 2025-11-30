@@ -6,20 +6,21 @@ rosrun rosserial_python serial_node.py _port:=/dev/ttyACM0 _baud:=115200 __name:
 [INFO] [1764484543.053198]: Setup subscriber on cmd_vel [geometry_msgs/Twist]
 [INFO] [1764484543.057488]: Setup subscriber on /set_mode [std_msgs/Int8]
 
-rosrun rosserial_python serial_node.py _port:=/dev/ttyUSB0 _baud:=57600  __name:=node_encoder
-[INFO] [1764484691.784802]: ROS Serial Python Node
-[INFO] [1764484691.789679]: Connecting to /dev/ttyUSB0 at 57600 baud
-[INFO] [1764484693.896321]: Requesting topics...
-[INFO] [1764484693.933339]: Note: publish buffer size is 280 bytes
-[INFO] [1764484693.934119]: Setup publisher on quaternion [geometry_msgs/Quaternion]
+rosrun rosserial_python serial_node.py _port:=/dev/ttyUSB0 _baud:=57600  __name:=node_imu
+[INFO] [1764485103.253748]: ROS Serial Python Node
+[INFO] [1764485103.260338]: Connecting to /dev/ttyUSB0 at 57600 baud
+[INFO] [1764485105.367295]: Requesting topics...
+[INFO] [1764485105.407369]: Note: publish buffer size is 280 bytes
+[INFO] [1764485105.408921]: Setup publisher on quaternion [geometry_msgs/Quaternion]
 
-rosrun rosserial_python serial_node.py _port:=/dev/ttyUSB1  _baud:=115200  __name:=node_imu
-[INFO] [1764484825.734387]: ROS Serial Python Node
-[INFO] [1764484825.740527]: Connecting to /dev/ttyUSB1 at 115200 baud
-[INFO] [1764484827.847143]: Requesting topics...
-[INFO] [1764484827.894063]: Note: publish buffer size is 512 bytes
-[INFO] [1764484827.896140]: Setup publisher on right_ticks [std_msgs/Int16]
-[INFO] [1764484827.900707]: Setup publisher on left_ticks [std_msgs/Int16]
+rosrun rosserial_python serial_node.py _port:=/dev/ttyUSB1  _baud:=115200  __name:=node_encoder
+[INFO] [1764485116.440710]: ROS Serial Python Node
+[INFO] [1764485116.446870]: Connecting to /dev/ttyUSB1 at 115200 baud
+[INFO] [1764485118.551820]: Requesting topics...
+[INFO] [1764485118.601587]: Note: publish buffer size is 512 bytes
+[INFO] [1764485118.603245]: Setup publisher on right_ticks [std_msgs/Int16]
+[INFO] [1764485118.607989]: Setup publisher on left_ticks [std_msgs/Int16]
+
 
 rostopic list 
 /cmd_vel
