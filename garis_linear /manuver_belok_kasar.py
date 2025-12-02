@@ -8,21 +8,30 @@ from std_msgs.msg import Int8, Int16
 
 class ManuverBelokKasar:
     def __init__(self):
+        # Inisialisasi Node
         rospy.init_node('node_manuver_kasar', anonymous=True)
         
+        # Konfigurasi Folder
         self.output_folder = os.path.expanduser('~/data_skripsi')
         if not os.path.exists(self.output_folder):
             os.makedirs(self.output_folder)
             
+        # Publisher
         self.pub_vel = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
         self.pub_mode = rospy.Publisher('/set_mode', Int8, queue_size=10)
         
-        # Subscribe ke KEDUA Encoder (Penting untuk analisis belok)
-        self.sub_left = rospy.Subscriber('/left_ticks', Int16, self.left_cb)
-        self.sub_right = rospy.Subscriber('/right_ticks', Int16, self.right_cb)
+        # Subscribe ke KEDUA Ticks
+        self.sub_left = rospy.Subscriber('/left_ticks', Int16, self.left_callback)
+        self.sub_right = rospy.Subscriber('/right_ticks', Int16, self.right_callback)
         
-        self.left_ticks = 0
-        self.right_ticks = 0
+        # Variabel Data
+        self.ticks_L = 0
+        self.ticks_R = 0
+        self.last_ticks_L = 0
+        self.last_ticks_R = 0
+        self.last_time = 0
+        self.velocity_ticks = 0.0 # Kecepatan Rata-rata Robot
+        
         self.csv_writer = None
         self.file_handle = None
         self.start_rec_time = 0
@@ -31,23 +40,50 @@ class ManuverBelokKasar:
         print("[INIT] Menunggu sistem siap...")
         rospy.sleep(2)
 
-    def left_cb(self, msg):
-        self.left_ticks = msg.data
+    def left_callback(self, msg):
+        self.ticks_L = msg.data
+        self.hitung_kecepatan()
 
-    def right_cb(self, msg):
-        self.right_ticks = msg.data
-        # Rekam data setiap kali ada update (Sampling Rate ikut sensor)
+    def right_callback(self, msg):
+        self.ticks_R = msg.data
+        self.hitung_kecepatan()
+
+    def hitung_kecepatan(self):
+        current_time = rospy.get_time()
+        
+        if self.last_time != 0:
+            delta_time = current_time - self.last_time
+            if delta_time > 0:
+                # 1. Hitung Delta Kiri
+                delta_L = self.ticks_L - self.last_ticks_L
+                if delta_L < -30000: delta_L += 65536 
+                elif delta_L > 30000: delta_L -= 65536 
+                
+                # 2. Hitung Delta Kanan
+                delta_R = self.ticks_R - self.last_ticks_R
+                if delta_R < -30000: delta_R += 65536 
+                elif delta_R > 30000: delta_R -= 65536 
+                
+                # 3. Kecepatan Robot = Rata-rata (vL + vR) / 2
+                vel_L = delta_L / delta_time
+                vel_R = delta_R / delta_time
+                self.velocity_ticks = (vel_L + vel_R) / 2.0
+                
+        self.last_ticks_L = self.ticks_L
+        self.last_ticks_R = self.ticks_R
+        self.last_time = current_time
+        
+        # Simpan ke CSV
         if self.is_recording and self.csv_writer:
             t_stamp = rospy.get_time() - self.start_rec_time
-            # Simpan: Waktu, Ticks Kiri, Ticks Kanan
-            self.csv_writer.writerow([t_stamp, self.left_ticks, self.right_ticks])
+            avg_ticks = (self.ticks_L + self.ticks_R) / 2.0
+            # FORMAT: Waktu, Total_Ticks_Avg, Kecepatan_Avg
+            self.csv_writer.writerow([t_stamp, avg_ticks, self.velocity_ticks])
 
     def stop_robot(self, durasi):
-        # Fungsi helper untuk diam
         msg = Twist()
         msg.linear.x = 0.0
         msg.angular.z = 0.0
-        
         end_time = rospy.get_time() + durasi
         while rospy.get_time() < end_time:
             self.pub_vel.publish(msg)
@@ -70,7 +106,7 @@ class ManuverBelokKasar:
         filename = os.path.join(self.output_folder, 'data_manuver_kasar.csv')
         self.file_handle = open(filename, 'w', newline='')
         self.csv_writer = csv.writer(self.file_handle)
-        self.csv_writer.writerow(['Waktu(s)', 'Left_Ticks', 'Right_Ticks'])
+        self.csv_writer.writerow(['Waktu(s)', 'Total_Ticks', 'Kecepatan(Ticks/s)'])
         
         print("[READY] Robot akan bergerak dalam 3 detik...")
         rospy.sleep(3)
@@ -78,56 +114,50 @@ class ManuverBelokKasar:
         self.start_rec_time = rospy.get_time()
         self.is_recording = True
         
-        # --- KOREOGRAFI ---
+        # --- KOREOGRAFI MANUVER ---
 
-        # PHASE 1: MAJU LURUS (2 Detik)
-        print("--> [1/5] Maju Lurus (0.5 m/s)...")
+        # 1. MAJU LURUS
+        print("--> [1/5] Maju Lurus...")
         msg = Twist()
         msg.linear.x = 0.5
         msg.angular.z = 0.0
-        
-        end_time = rospy.get_time() + 2.0
-        while rospy.get_time() < end_time:
+        end_t = rospy.get_time() + 2.0
+        while rospy.get_time() < end_t:
             self.pub_vel.publish(msg)
             rospy.sleep(0.1)
 
-        # PHASE 2: JEDA (3 Detik)
-        print("--> [2/5] Jeda (0 m/s)...")
+        # 2. JEDA
+        print("--> [2/5] Jeda...")
         self.stop_robot(3.0)
 
-        # PHASE 3: BELOK KIRI (3 Detik)
-        # Kombinasi Linear + Angular
-        print("--> [3/5] Belok Kiri (Maju 0.5 + Putar 0.5)...")
+        # 3. BELOK KIRI (Linear + Angular)
+        print("--> [3/5] Belok Kiri...")
         msg.linear.x = 0.5
-        msg.angular.z = 0.5 
-        
-        end_time = rospy.get_time() + 3.0
-        while rospy.get_time() < end_time:
+        msg.angular.z = 0.5
+        end_t = rospy.get_time() + 3.0
+        while rospy.get_time() < end_t:
             self.pub_vel.publish(msg)
             rospy.sleep(0.1)
 
-        # PHASE 4: JEDA (3 Detik)
-        print("--> [4/5] Jeda (0 m/s)...")
+        # 4. JEDA
+        print("--> [4/5] Jeda...")
         self.stop_robot(3.0)
 
-        # PHASE 5: MAJU LURUS LAGI (2 Detik)
-        print("--> [5/5] Maju Lurus Lagi (0.5 m/s)...")
+        # 5. MAJU LURUS
+        print("--> [5/5] Maju Lurus...")
         msg.linear.x = 0.5
         msg.angular.z = 0.0
-        
-        end_time = rospy.get_time() + 2.0
-        while rospy.get_time() < end_time:
+        end_t = rospy.get_time() + 2.0
+        while rospy.get_time() < end_t:
             self.pub_vel.publish(msg)
             rospy.sleep(0.1)
 
-        # FINISH
+        # SELESAI
         print("--> SELESAI.")
-        self.stop_robot(1.0) # Pastikan diam
-
+        self.stop_robot(1.0)
         self.is_recording = False
         self.file_handle.close()
-        print(f"\n[SELESAI] Data tersimpan di: {filename}")
-        print("Silakan RESET posisi robot ke titik awal.")
+        print(f"[SAVED] {filename}")
 
 if __name__ == '__main__':
     try:
