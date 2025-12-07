@@ -3,164 +3,141 @@ import rospy
 import csv
 import time
 import os
+from collections import deque
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Int8, Int16
 
-class AmbilDataHalusBersih:
+class AmbilDataHalusFinal:
     def __init__(self):
-        # Initialize Node
-        rospy.init_node('node_ambil_data_halus_bersih', anonymous=True)
+        rospy.init_node('node_data_halus_final', anonymous=True)
         
-        # Configure Output Folder
         self.output_folder = os.path.expanduser('~/data_skripsi')
         if not os.path.exists(self.output_folder):
             os.makedirs(self.output_folder)
             
-        # Publisher
         self.pub_vel = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
         self.pub_mode = rospy.Publisher('/set_mode', Int8, queue_size=10)
-        
-        # Subscribe to Right Ticks (Consistent with your previous linear test)
         self.sub_ticks = rospy.Subscriber('/right_ticks', Int16, self.ticks_callback)
         
-        # Variables for Unwrapping & Zeroing
-        self.raw_ticks = 0
+        # --- KONFIGURASI SAMA PERSIS ---
+        self.METER_PER_TICK = 0.025  
+        self.SMOOTHING_WINDOW = 10   
+        
+        self.buffer_ticks = deque(maxlen=self.SMOOTHING_WINDOW + 1)
+        self.buffer_time = deque(maxlen=self.SMOOTHING_WINDOW + 1)
+
         self.prev_raw = 0
         self.total_ticks = 0
         self.offset_ticks = 0
-        
         self.first_run = True
+        
         self.csv_writer = None
         self.file_handle = None
         self.start_rec_time = 0
         self.is_recording = False
-        
-        # Variables for Velocity Calculation
-        self.last_time = 0
-        self.velocity_ticks = 0.0
 
-        # Test Parameters
         self.kecepatan_uji = 0.5 
         self.durasi_jalan = 5.0
         self.durasi_diam = 2.0
 
-        print("[INIT] Calibrating Encoder (Wait 2 seconds)...")
+        print("[INIT] Menunggu sistem siap...")
         rospy.sleep(2)
 
     def unwrap(self, current, prev, total):
-        # Logic to handle Int16 overflow (-32768 to 32767)
         diff = current - prev
-        if diff < -30000:       # Jump from 32767 to -32768
-            total += 65536 + diff
-        elif diff > 30000:      # Jump from -32768 to 32767
-            total += -65536 + diff
-        else:
-            total += diff
+        if diff < -30000: total += 65536 + diff
+        elif diff > 30000: total += -65536 + diff
+        else: total += diff
         return total
 
     def ticks_callback(self, msg):
-        self.raw_ticks = msg.data
-        current_time = rospy.get_time()
-        
-        # 1. Initialize First Data
+        raw = msg.data
+        curr_time = rospy.get_time()
+
         if self.first_run:
-            self.prev_raw = self.raw_ticks
-            self.last_time = current_time
+            self.prev_raw = raw
             self.first_run = False
             return
 
-        # 2. Update Total Ticks (Unwrapping)
-        self.total_ticks = self.unwrap(self.raw_ticks, self.prev_raw, self.total_ticks)
+        self.total_ticks = self.unwrap(raw, self.prev_raw, self.total_ticks)
+        self.prev_raw = raw
         
-        # 3. Calculate Velocity (Ticks/s)
-        if self.last_time != 0:
-            delta_time = current_time - self.last_time
-            if delta_time > 0:
-                # Calculate delta from raw values to be safe with time sync
-                delta_ticks = self.raw_ticks - self.prev_raw
-                # Handle overflow for delta calculation
-                if delta_ticks < -30000: delta_ticks += 65536
-                elif delta_ticks > 30000: delta_ticks -= 65536
+        clean_ticks = self.total_ticks - self.offset_ticks
+        
+        if self.is_recording:
+            rec_time = curr_time - self.start_rec_time
+            
+            self.buffer_ticks.append(clean_ticks)
+            self.buffer_time.append(rec_time)
+            
+            velocity_ms = 0.0
+            if len(self.buffer_ticks) >= 2:
+                dt = self.buffer_time[-1] - self.buffer_time[0]
+                d_ticks = self.buffer_ticks[-1] - self.buffer_ticks[0]
                 
-                self.velocity_ticks = delta_ticks / delta_time
-        
-        # Update previous state
-        self.prev_raw = self.raw_ticks
-        self.last_time = current_time
-        
-        # 4. Record Clean Data
-        if self.is_recording and self.csv_writer:
-            t_stamp = rospy.get_time() - self.start_rec_time
-            
-            # Clean Ticks = Total Accumulated - Offset at start
-            clean_ticks = self.total_ticks - self.offset_ticks
-            
-            # Format: Time, Clean_Total_Ticks, Velocity
-            self.csv_writer.writerow([t_stamp, clean_ticks, self.velocity_ticks])
+                if dt > 0:
+                    velocity_ticks = d_ticks / dt
+                    velocity_ms = velocity_ticks * self.METER_PER_TICK
+
+            if self.csv_writer:
+                self.csv_writer.writerow([rec_time, clean_ticks, velocity_ms])
 
     def run(self):
-        # 1. SET MODE HALUS (1)
+        # SET MODE HALUS (1)
         mode_msg = Int8()
         mode_msg.data = 1 
         for i in range(5):
             self.pub_mode.publish(mode_msg)
             rospy.sleep(0.1)
             
-        print("\n=============================================")
-        print("[STATUS] Mode Robot: HALUS (Ramp Rate)")
-        print("=============================================")
+        print("\n=== MODE HALUS (FINAL) ===")
+        print("Data tersimpan sudah bersih & terkonversi ke m/s.")
         rospy.sleep(1)
 
-        # 2. RESET DATA TO ZERO
-        self.offset_ticks = self.total_ticks # Set current total as zero point
-        print(f"[INFO] Offset set to: {self.offset_ticks}. Recording will start from 0.")
+        self.offset_ticks = self.total_ticks
+        self.buffer_ticks.clear()
+        self.buffer_time.clear()
 
-        # 3. OPEN CSV FILE
-        filename = os.path.join(self.output_folder, 'data_halus_clean.csv')
+        filename = os.path.join(self.output_folder, 'data_halus_final.csv')
         self.file_handle = open(filename, 'w', newline='')
         self.csv_writer = csv.writer(self.file_handle)
-        self.csv_writer.writerow(['Waktu(s)', 'Total_Ticks', 'Kecepatan(Ticks/s)'])
+        self.csv_writer.writerow(['Waktu(s)', 'Jarak(ticks)', 'Kecepatan(m/s)'])
         
-        print(f"[READY] Robot will move in 3 seconds...")
+        print("[READY] Gerak dalam 3 detik...")
         rospy.sleep(3)
         
-        # 4. START MOVING & RECORDING
-        print("[GO] Recording...")
+        print("[GO] Merekam...")
         self.start_rec_time = rospy.get_time()
         self.is_recording = True
         
         msg = Twist()
         msg.linear.x = self.kecepatan_uji
         
+        # JALAN
         start_run = rospy.get_time()
         while (rospy.get_time() - start_run) < self.durasi_jalan:
             self.pub_vel.publish(msg)
             rospy.sleep(0.1)
 
-        # 5. STOP ROBOT
-        print("[STOP] Braking...")
+        # STOP
+        print("[STOP] Pengereman...")
         msg.linear.x = 0.0
-        
         start_stop = rospy.get_time()
         while (rospy.get_time() - start_stop) < self.durasi_diam:
             self.pub_vel.publish(msg)
             rospy.sleep(0.1)
 
-        # 6. FINISH
         self.is_recording = False
         self.file_handle.close()
-        
-        # Ensure full stop
         for i in range(5):
             self.pub_vel.publish(msg)
             rospy.sleep(0.1)
             
-        print(f"\n[DONE] Clean data saved to: {filename}")
-        print("Recording finished.")
+        print(f"[SELESAI] File: {filename}")
 
 if __name__ == '__main__':
     try:
-        app = AmbilDataHalusBersih()
+        app = AmbilDataHalusFinal()
         app.run()
     except rospy.ROSInterruptException:
         pass
