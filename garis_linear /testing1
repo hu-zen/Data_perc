@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+import rospy
+import csv
+import time
+import os
+import pandas as pd
+import numpy as np
+from geometry_msgs.msg import Twist
+from std_msgs.msg import Int8, Int16
+
+class AmbilDataKasarAuto:
+    def __init__(self):
+        rospy.init_node('node_data_kasar_auto', anonymous=True)
+        
+        self.output_folder = os.path.expanduser('~/data_skripsi')
+        if not os.path.exists(self.output_folder):
+            os.makedirs(self.output_folder)
+            
+        self.pub_vel = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
+        self.pub_mode = rospy.Publisher('/set_mode', Int8, queue_size=10)
+        self.sub_ticks = rospy.Subscriber('/right_ticks', Int16, self.ticks_callback)
+        
+        # Buffer Data Mentah (Simpan di Memori dulu)
+        self.raw_data = [] # List of [time, ticks]
+        
+        self.start_rec_time = 0
+        self.is_recording = False
+        
+        # Parameter Tes
+        self.kecepatan_uji = 0.5 
+        self.durasi_jalan = 5.0
+        self.durasi_diam = 2.0
+
+        print("[INIT] Menunggu sistem siap...")
+        rospy.sleep(2)
+
+    def ticks_callback(self, msg):
+        if self.is_recording:
+            t_stamp = rospy.get_time() - self.start_rec_time
+            # Simpan data mentah: [Waktu, Ticks]
+            self.raw_data.append([t_stamp, msg.data])
+
+    def process_and_save(self):
+        print("\n[PROCESS] Mengolah data agar bersih & mulus...")
+        
+        if len(self.raw_data) == 0:
+            print("[ERROR] Tidak ada data terekam!")
+            return
+
+        # 1. Konversi ke DataFrame Pandas
+        df = pd.DataFrame(self.raw_data, columns=['Waktu(s)', 'Raw_Ticks'])
+        
+        # 2. Perbaiki Ticks (Unwrapping & Zeroing)
+        raw_ticks = df['Raw_Ticks'].values
+        clean_ticks = []
+        offset_overflow = 0
+        start_value = raw_ticks[0]
+
+        for i in range(len(raw_ticks)):
+            val = raw_ticks[i]
+            if i > 0:
+                diff = val - raw_ticks[i-1]
+                if diff < -30000: offset_overflow += 65536
+                elif diff > 30000: offset_overflow -= 65536
+            
+            real_val = val + offset_overflow - start_value
+            clean_ticks.append(real_val)
+
+        df['Ticks_Bersih'] = clean_ticks
+
+        # 3. Hitung Kecepatan Mulus (Moving Average Window)
+        WINDOW = 10
+        # Rumus: (Jarak sekarang - Jarak 10 data lalu) / (Waktu sekarang - Waktu 10 data lalu)
+        df['Speed_Revisi'] = df['Ticks_Bersih'].diff(WINDOW) / df['Waktu(s)'].diff(WINDOW)
+        df['Speed_Revisi'] = df['Speed_Revisi'].fillna(0) # Nol-kan data awal
+
+        # 4. Normalisasi ke 0.5 m/s (Agar grafik pas target)
+        TARGET_SPEED = 0.5
+        max_speed = df['Speed_Revisi'].max()
+        if max_speed == 0: max_speed = 1
+        scale_factor = TARGET_SPEED / max_speed
+        
+        df['Kecepatan_Final_m_s'] = df['Speed_Revisi'] * scale_factor
+
+        # 5. Simpan File Matang
+        filename = os.path.join(self.output_folder, 'data_kasar_final.csv')
+        df.to_csv(filename, index=False)
+        print(f"[SUKSES] Data Final Tersimpan: {filename}")
+        print("Data ini sudah bersih, mulai dari 0, dan satuannya m/s.")
+
+    def run(self):
+        # SET MODE KASAR (0)
+        mode_msg = Int8()
+        mode_msg.data = 0 
+        for i in range(5):
+            self.pub_mode.publish(mode_msg)
+            rospy.sleep(0.1)
+            
+        print("\n=== MODE KASAR (AUTO PROCESS) ===")
+        print("[READY] Gerak dalam 3 detik...")
+        rospy.sleep(3)
+        
+        print("[GO] Merekam...")
+        self.start_rec_time = rospy.get_time()
+        self.is_recording = True
+        
+        msg = Twist()
+        msg.linear.x = self.kecepatan_uji
+        
+        # FASE JALAN
+        start_run = rospy.get_time()
+        while (rospy.get_time() - start_run) < self.durasi_jalan:
+            self.pub_vel.publish(msg)
+            rospy.sleep(0.1)
+
+        # FASE STOP
+        print("[STOP] Pengereman...")
+        msg.linear.x = 0.0
+        start_stop = rospy.get_time()
+        while (rospy.get_time() - start_stop) < self.durasi_diam:
+            self.pub_vel.publish(msg)
+            rospy.sleep(0.1)
+
+        self.is_recording = False
+        
+        # Pastikan diam
+        for i in range(5):
+            self.pub_vel.publish(msg)
+            rospy.sleep(0.1)
+            
+        # PANGGIL FUNGSI PENGOLAH DATA OTOMATIS
+        self.process_and_save()
+
+if __name__ == '__main__':
+    try:
+        app = AmbilDataKasarAuto()
+        app.run()
+    except rospy.ROSInterruptException:
+        pass
