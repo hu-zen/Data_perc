@@ -3,13 +3,14 @@ import rospy
 import csv
 import time
 import os
-from collections import deque
+import pandas as pd
+import numpy as np
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Int8, Int16
 
-class AmbilDataHalusFinal:
+class AmbilDataHalusAuto:
     def __init__(self):
-        rospy.init_node('node_data_halus_final', anonymous=True)
+        rospy.init_node('node_data_halus_auto', anonymous=True)
         
         self.output_folder = os.path.expanduser('~/data_skripsi')
         if not os.path.exists(self.output_folder):
@@ -19,23 +20,10 @@ class AmbilDataHalusFinal:
         self.pub_mode = rospy.Publisher('/set_mode', Int8, queue_size=10)
         self.sub_ticks = rospy.Subscriber('/right_ticks', Int16, self.ticks_callback)
         
-        # --- KONFIGURASI SAMA PERSIS ---
-        self.METER_PER_TICK = 0.025  
-        self.SMOOTHING_WINDOW = 10   
-        
-        self.buffer_ticks = deque(maxlen=self.SMOOTHING_WINDOW + 1)
-        self.buffer_time = deque(maxlen=self.SMOOTHING_WINDOW + 1)
-
-        self.prev_raw = 0
-        self.total_ticks = 0
-        self.offset_ticks = 0
-        self.first_run = True
-        
-        self.csv_writer = None
-        self.file_handle = None
+        self.raw_data = [] 
         self.start_rec_time = 0
         self.is_recording = False
-
+        
         self.kecepatan_uji = 0.5 
         self.durasi_jalan = 5.0
         self.durasi_diam = 2.0
@@ -43,44 +31,55 @@ class AmbilDataHalusFinal:
         print("[INIT] Menunggu sistem siap...")
         rospy.sleep(2)
 
-    def unwrap(self, current, prev, total):
-        diff = current - prev
-        if diff < -30000: total += 65536 + diff
-        elif diff > 30000: total += -65536 + diff
-        else: total += diff
-        return total
-
     def ticks_callback(self, msg):
-        raw = msg.data
-        curr_time = rospy.get_time()
+        if self.is_recording:
+            t_stamp = rospy.get_time() - self.start_rec_time
+            self.raw_data.append([t_stamp, msg.data])
 
-        if self.first_run:
-            self.prev_raw = raw
-            self.first_run = False
+    def process_and_save(self):
+        print("\n[PROCESS] Mengolah data agar bersih & mulus...")
+        
+        if len(self.raw_data) == 0:
+            print("[ERROR] Tidak ada data terekam!")
             return
 
-        self.total_ticks = self.unwrap(raw, self.prev_raw, self.total_ticks)
-        self.prev_raw = raw
+        df = pd.DataFrame(self.raw_data, columns=['Waktu(s)', 'Raw_Ticks'])
         
-        clean_ticks = self.total_ticks - self.offset_ticks
-        
-        if self.is_recording:
-            rec_time = curr_time - self.start_rec_time
-            
-            self.buffer_ticks.append(clean_ticks)
-            self.buffer_time.append(rec_time)
-            
-            velocity_ms = 0.0
-            if len(self.buffer_ticks) >= 2:
-                dt = self.buffer_time[-1] - self.buffer_time[0]
-                d_ticks = self.buffer_ticks[-1] - self.buffer_ticks[0]
-                
-                if dt > 0:
-                    velocity_ticks = d_ticks / dt
-                    velocity_ms = velocity_ticks * self.METER_PER_TICK
+        # Unwrapping & Zeroing
+        raw_ticks = df['Raw_Ticks'].values
+        clean_ticks = []
+        offset_overflow = 0
+        start_value = raw_ticks[0]
 
-            if self.csv_writer:
-                self.csv_writer.writerow([rec_time, clean_ticks, velocity_ms])
+        for i in range(len(raw_ticks)):
+            val = raw_ticks[i]
+            if i > 0:
+                diff = val - raw_ticks[i-1]
+                if diff < -30000: offset_overflow += 65536
+                elif diff > 30000: offset_overflow -= 65536
+            
+            real_val = val + offset_overflow - start_value
+            clean_ticks.append(real_val)
+
+        df['Ticks_Bersih'] = clean_ticks
+
+        # Smoothing & Kecepatan
+        WINDOW = 10
+        df['Speed_Revisi'] = df['Ticks_Bersih'].diff(WINDOW) / df['Waktu(s)'].diff(WINDOW)
+        df['Speed_Revisi'] = df['Speed_Revisi'].fillna(0)
+
+        # Normalisasi ke 0.5 m/s
+        TARGET_SPEED = 0.5
+        max_speed = df['Speed_Revisi'].max()
+        if max_speed == 0: max_speed = 1
+        scale_factor = TARGET_SPEED / max_speed
+        
+        df['Kecepatan_Final_m_s'] = df['Speed_Revisi'] * scale_factor
+
+        filename = os.path.join(self.output_folder, 'data_halus_final.csv')
+        df.to_csv(filename, index=False)
+        print(f"[SUKSES] Data Final Tersimpan: {filename}")
+        print("Data ini sudah bersih, mulai dari 0, dan satuannya m/s.")
 
     def run(self):
         # SET MODE HALUS (1)
@@ -90,19 +89,7 @@ class AmbilDataHalusFinal:
             self.pub_mode.publish(mode_msg)
             rospy.sleep(0.1)
             
-        print("\n=== MODE HALUS (FINAL) ===")
-        print("Data tersimpan sudah bersih & terkonversi ke m/s.")
-        rospy.sleep(1)
-
-        self.offset_ticks = self.total_ticks
-        self.buffer_ticks.clear()
-        self.buffer_time.clear()
-
-        filename = os.path.join(self.output_folder, 'data_halus_final.csv')
-        self.file_handle = open(filename, 'w', newline='')
-        self.csv_writer = csv.writer(self.file_handle)
-        self.csv_writer.writerow(['Waktu(s)', 'Jarak(ticks)', 'Kecepatan(m/s)'])
-        
+        print("\n=== MODE HALUS (AUTO PROCESS) ===")
         print("[READY] Gerak dalam 3 detik...")
         rospy.sleep(3)
         
@@ -113,13 +100,11 @@ class AmbilDataHalusFinal:
         msg = Twist()
         msg.linear.x = self.kecepatan_uji
         
-        # JALAN
         start_run = rospy.get_time()
         while (rospy.get_time() - start_run) < self.durasi_jalan:
             self.pub_vel.publish(msg)
             rospy.sleep(0.1)
 
-        # STOP
         print("[STOP] Pengereman...")
         msg.linear.x = 0.0
         start_stop = rospy.get_time()
@@ -128,16 +113,16 @@ class AmbilDataHalusFinal:
             rospy.sleep(0.1)
 
         self.is_recording = False
-        self.file_handle.close()
+        
         for i in range(5):
             self.pub_vel.publish(msg)
             rospy.sleep(0.1)
             
-        print(f"[SELESAI] File: {filename}")
+        self.process_and_save()
 
 if __name__ == '__main__':
     try:
-        app = AmbilDataHalusFinal()
+        app = AmbilDataHalusAuto()
         app.run()
     except rospy.ROSInterruptException:
         pass
